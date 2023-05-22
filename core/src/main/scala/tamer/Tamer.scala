@@ -69,17 +69,17 @@ object Tamer {
     }
 
   private[tamer] final def source[K, V, S](
-      stateTopic: String,
-      stateGroupId: String,
-      stateHash: Int,
-      stateKeySerde: ZSerde[Has[Registry], StateKey],
-      stateValueSerde: ZSerde[Has[Registry], S],
-      initialState: S,
-      consumer: Consumer,
-      producer: TransactionalProducer,
-      queue: Enqueue[(TransactionInfo, Chunk[(K, V)])],
-      iterationFunction: (S, Enqueue[NonEmptyChunk[(K, V)]]) => Task[S],
-      log: LogWriter[Task]
+                                            stateTopic: String,
+                                            stateGroupId: String,
+                                            stateHash: Int,
+                                            stateKeySerde: ZSerde[Has[Registry], StateKey],
+                                            stateValueSerde: ZSerde[Has[Registry], S],
+                                            initialState: S,
+                                            consumer: Consumer,
+                                            producer: TransactionalProducer,
+                                            queue: Enqueue[(TransactionInfo, Chunk[(K, V)])],
+                                            iterationStream: S => ZStream[Any, Throwable, ((K, V), S)],
+                                            log: LogWriter[Task]
   ) = {
 
     val key          = StateKey(stateHash.toHexString, stateGroupId)
@@ -150,7 +150,7 @@ object Tamer {
       serdes: Setup.Serdes[K, V, S],
       initialState: S,
       stateHash: Int,
-      iterationFunction: (S, Enqueue[NonEmptyChunk[(K, V)]]) => Task[S],
+      iterationFunction: S => ZStream[Any, Throwable, ((K, V), S)],
       repr: String,
       consumer: Consumer,
       producer: TransactionalProducer
@@ -227,7 +227,7 @@ object Tamer {
         serdes: Setup.Serdes[K, V, S],
         initialState: S,
         stateKey: Int,
-        iterationFunction: (S, Enqueue[NonEmptyChunk[(K, V)]]) => Task[S],
+        iterationStream: S => ZStream[Any, Throwable, ((K, V), S)],
         repr: String
     ): ZManaged[Blocking with Clock, TamerError, Live[K, V, S]] = {
 
@@ -250,7 +250,7 @@ object Tamer {
           Consumer.make(transactionalConsumerSettings),
           TransactionalProducer.make(transactionalProducerSettings)
         ) {
-          new Live(config, serdes, initialState, stateKey, iterationFunction, repr, _, _)
+          new Live(config, serdes, initialState, stateKey, iterationStream, repr, _, _)
         }
         .mapError(TamerError("Could not build Kafka client", _))
     }
@@ -259,7 +259,8 @@ object Tamer {
         setup: Setup[R, K, V, S]
     ): ZLayer[R with Blocking with Clock with Has[KafkaConfig], TamerError, Has[Tamer]] =
       ZLayer.fromServiceManaged[KafkaConfig, R with Blocking with Clock, TamerError, Tamer] { config =>
-        val iterationFunctionManaged = ZManaged.environment[R].map(r => Function.untupled((setup.iteration _).tupled.andThen(_.provide(r))))
+        val iterationFunctionManaged: ZManaged[R, Nothing, S => ZStream[Any, Throwable, ((K, V), S)]] =
+          ZManaged.environment[R].map(r => (setup.iteration _).andThen(_.provide(r)))
         iterationFunctionManaged.flatMap(getManaged(config, setup.serdes, setup.initialState, setup.stateKey, _, setup.repr))
       }
   }
