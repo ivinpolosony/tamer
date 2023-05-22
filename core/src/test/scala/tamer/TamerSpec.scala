@@ -11,6 +11,7 @@ import zio.test.Assertion.equalTo
 import zio.test.TestAspect.timeout
 import zio.test._
 import zio.test.environment.TestEnvironment
+import zio.stream.ZStream
 
 object TamerSpec extends DefaultRunnableSpec with TamerSpecGen {
 
@@ -21,6 +22,21 @@ object TamerSpec extends DefaultRunnableSpec with TamerSpecGen {
 
   val baseTamerLayer = Tamer.live {
     new Setup[Has[Ref[Log]], Key, Value, State] {
+
+      override def iteration(currentState: State): ZStream[Has[Ref[Log]], Throwable, (Option[NonEmptyChunk[(Key, Value)]], State)] = {
+        val cursor = currentState.state + 1
+        if (cursor <= 10) {
+          for {
+            logRef <- ZStream.service[Ref[Log]]
+            _      <- ZStream.fromEffect(logRef.update(log => log.copy(log.series ++ Vector(cursor))))
+            ch = NonEmptyChunk.fromChunk(Chunk(Key(cursor) -> Value(cursor)))
+          } yield (ch, State(cursor))
+
+        } else {
+          ZStream.empty
+        }
+      }
+
       override final val serdes       = Setup.mkSerdes[Key, Value, State]
       override final val initialState = State(0)
       override final val stateKey     = 0

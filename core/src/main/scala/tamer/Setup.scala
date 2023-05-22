@@ -4,6 +4,7 @@ import zio._
 import zio.blocking.Blocking
 import zio.clock.Clock
 import zio.kafka.serde.{Serde => ZSerde, Serializer}
+import zio.stream.ZStream
 
 abstract class Setup[-R, K, V, S] {
   val serdes: Setup.Serdes[K, V, S]
@@ -11,7 +12,18 @@ abstract class Setup[-R, K, V, S] {
   val stateKey: Int
   val recordKey: (S, V) => K
   val repr: String = "no repr string implemented, if you want a neat description of the source configuration please implement it"
-  def iteration(currentState: S, queue: Enqueue[NonEmptyChunk[(K, V)]]): RIO[R, S]
+  val monitor: StateMonitor[R, S, (K, V)] = StateMonitor.noOp
+
+//  def iteration(currentState: S): ZStream[R, Throwable, (Option[NonEmptyChunk[(K, V)]], S)]
+  def iteration(currentState: S): ZStream[R, Throwable, ((K, V), S)]
+
+//  def iteration(currentState: S, queue: Enqueue[NonEmptyChunk[(K, V)]]): RIO[R, S] =
+//    iteration(currentState)
+//      .onError(e => monitor.notifyCompletion(Left(e.failureOption)))
+//      .tap { case (maybeChk, newSt) => maybeChk.map(queue.offer).getOrElse(IO.unit) *> monitor.notifyCompletion(Right((maybeChk, newSt))) }
+//      .map(_._2)
+//      .runLast
+//      .map(_.getOrElse(currentState))
 
   final val run: ZIO[R with Has[KafkaConfig] with Blocking with Clock, TamerError, Unit] =
     runLoop.provideSomeLayer(Tamer.live(this))

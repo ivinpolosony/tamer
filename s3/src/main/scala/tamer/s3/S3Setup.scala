@@ -13,6 +13,8 @@ import zio.s3._
 import zio.stream.ZTransducer
 
 import scala.math.Ordering.Implicits.infixOrderingOps
+import zio.stream.ZStream
+// import zio.stream.ZStream
 
 sealed abstract case class S3Setup[R, K, V, S: Hashable](
     serdes: Setup.Serdes[K, V, S],
@@ -84,9 +86,11 @@ sealed abstract case class S3Setup[R, K, V, S: Hashable](
     } yield EphemeralChange(detectedKeyListChanged)
   }
 
-  protected final def process(keysR: KeysR, keysChangedToken: Queue[Unit], currentState: S, queue: Enqueue[NonEmptyChunk[(K, V)]]) = for {
-    log       <- logTask
-    nextState <- stateFold(keysR, currentState, keysChangedToken)
+  private def transform(optKey: String, nextState: S): Unit = {}
+
+  protected final def process(keysR: KeysR, keysChangedToken: Queue[Unit], currentState: S) = for {
+    log       <- ZStream.fromEffect(logTask)
+    nextState <- ZStream.fromEffect(stateFold(keysR, currentState, keysChangedToken))
     _         <- log.debug(s"next state computed to be $nextState")
     keys      <- keysR.get
     optKey    <- UIO(selectObjectForState(nextState, keys))
@@ -95,20 +99,33 @@ sealed abstract case class S3Setup[R, K, V, S: Hashable](
         getObject(bucket, _)
           .transduce(transducer)
           .map(value => recordKey(nextState, value) -> value)
-          .foreachChunk(chunk => NonEmptyChunk.fromChunk(chunk).map(queue.offer).getOrElse(UIO.unit))
       )
       .getOrElse(ZIO.fail(TamerError(s"File not found with key $optKey for state $nextState"))) // FIXME: relies on nextState.toString
   } yield nextState
 
-  override def iteration(currentState: S, queue: Enqueue[NonEmptyChunk[(K, V)]]): RIO[R with Clock with S3, S] = for {
-    sourceState <- initialEphemeralState
-    token       <- Queue.dropping[Unit](requestedCapacity = 1)
-    _ <- updatedSourceState(sourceState, token)
-      .scheduleFrom(EphemeralChange.Detected)(Schedule.once ++ fetchSchedule.untilInput(_ == EphemeralChange.Detected))
-      .forever
-      .fork
-    newState <- process(sourceState, token, currentState, queue)
-  } yield newState
+//  override def iteration(currentState: S, queue: Enqueue[NonEmptyChunk[(K, V)]]): RIO[R with Clock with S3, S] = for {
+//    sourceState <- initialEphemeralState
+//    token       <- Queue.dropping[Unit](requestedCapacity = 1)
+//    // token <- Promise.make[Nothing, Unit]
+//    _ <- updatedSourceState(sourceState, token)
+//      .scheduleFrom(EphemeralChange.Detected)(Schedule.once ++ fetchSchedule.untilInput(_ == EphemeralChange.Detected))
+//      .forever
+//      .fork
+//    newState <- process(sourceState, token, currentState, queue)
+//  } yield newState
+
+  override def iteration(currentState: S): ZStream[R with Clock with S3, Throwable, ((K, V), S)] =
+    for {
+      sourceState <- ZStream.fromEffect(initialEphemeralState)
+      token       <- ZStream.fromEffect(Queue.dropping[Unit](requestedCapacity = 1))
+      _ <- ZStream.fromEffect(
+        updatedSourceState(sourceState, token)
+          .scheduleFrom(EphemeralChange.Detected)(Schedule.once ++ fetchSchedule.untilInput(_ == EphemeralChange.Detected))
+          .forever
+          .fork
+      )
+      newState <- process(sourceState, token, currentState)
+    } yield newState
 }
 
 object S3Setup {
